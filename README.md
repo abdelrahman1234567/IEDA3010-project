@@ -180,5 +180,3 @@ with a 250-vehicle fleet, scaled together.
   (profit Gini is already reported).
 * Joint matching + repositioning in a single MILP, or a demand forecast that uses the
   known peak profile.
-#   I E D A 3 0 1 0 - p r o j e c t  
- 
