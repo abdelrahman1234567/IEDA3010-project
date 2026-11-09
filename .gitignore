@@ -11,6 +11,3 @@ __pycache__/
 
 # Experiment logs
 results/log_*.txt
-
-# Processed data (20 MB): regenerate with `cd src && python3 extract_mat.py`
-data_processed/*.npz
