@@ -1,64 +1,80 @@
-"""Data loading for the Shenzhen (Futian + Luohu) passenger request dataset.
+"""Load Shenzhen road-network data, passenger requests, and spatial zones."""
 
-data_processed/shenzhen.npz is produced by src/extract_mat.py from the original
-.mat files (unchanged in 'Project E datasets/'). It holds:
-  dist   : 1858 x 1858 all-pairs shortest road distance (km)
-  coord  : 1858 x 2 planar node coordinates (m)
-  t_xxx, o_xxx, d_xxx : request time (h), origin node, destination node (1-based)
-                        for gamma = 000, 025, 050, 075, 100
-"""
 from pathlib import Path
+
 import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NPZ = ROOT / "data_processed" / "shenzhen.npz"
-
 _cache = {}
 
 
 def load_network():
+    """Return the distance matrix (km) and planar node coordinates (m)."""
     if "net" not in _cache:
-        z = np.load(NPZ)
-        _cache["net"] = (z["dist"].astype(np.float32), z["coord"])
-        _cache["z"] = z
+        dataset = np.load(NPZ)
+        _cache["net"] = (dataset["dist"].astype(np.float32), dataset["coord"])
+        _cache["z"] = dataset
+
     return _cache["net"]
 
 
 def load_requests(gamma="050", sample_frac=0.02, seed=3010, t_max_min=180.0):
-    """Return a reproducible random sample of requests.
-
-    Output dict of numpy arrays: rid, t (minutes), o, d (0-based nodes).
-    Same seed -> same sampled request indices for every gamma, so scenarios
-    differ only in destinations (origins are identical across gamma files).
-    """
+    """Sample requests reproducibly; return rid, t (minutes), o, and d (zero-based)."""
     load_network()
-    z = _cache["z"]
-    t = z["t_" + gamma] * 60.0
-    o = z["o_" + gamma] - 1
-    d = z["d_" + gamma] - 1
+    dataset = _cache["z"]
+
+    request_times = dataset[f"t_{gamma}"] * 60.0
+    origins = dataset[f"o_{gamma}"] - 1
+    destinations = dataset[f"d_{gamma}"] - 1
+
     rng = np.random.default_rng(seed)
-    keep = rng.random(len(t)) < sample_frac
-    keep &= (o != d) & (t <= t_max_min)
-    idx = np.flatnonzero(keep)
-    return {"rid": np.arange(len(idx)), "t": t[idx], "o": o[idx].astype(int),
-            "d": d[idx].astype(int)}
+    selected = rng.random(len(request_times)) < sample_frac
+    selected &= (origins != destinations) & (request_times <= t_max_min)
+    indices = np.flatnonzero(selected)
+
+    # The random draw is shared across gamma scenarios; same-node trips are filtered afterward.
+    return {
+        "rid": np.arange(len(indices)),
+        "t": request_times[indices],
+        "o": origins[indices].astype(int),
+        "d": destinations[indices].astype(int),
+    }
 
 
 def make_zones(n_zones=16, seed=3010, iters=50):
-    """Partition road nodes into zones with k-means on planar coordinates.
-    Returns zone label per node and a 'centre' node per zone (node nearest the
-    centroid), used as the repositioning target."""
-    dist, coord = load_network()
-    X = (coord - coord.mean(0)) / 1000.0
+    """Cluster road nodes and choose each zone's nearest node to its centroid."""
+    _, coordinates = load_network()
+    scaled_coordinates = (coordinates - coordinates.mean(axis=0)) / 1000.0
+
     rng = np.random.default_rng(seed)
-    C = X[rng.choice(len(X), n_zones, replace=False)]
+    centroids = scaled_coordinates[
+        rng.choice(len(scaled_coordinates), n_zones, replace=False)
+    ]
+
     for _ in range(iters):
-        lab = np.argmin(((X[:, None, :] - C[None]) ** 2).sum(-1), axis=1)
-        newC = np.array([X[lab == k].mean(0) if np.any(lab == k) else C[k]
-                         for k in range(n_zones)])
-        if np.allclose(newC, C):
+        squared_distances = (
+            (scaled_coordinates[:, None, :] - centroids[None, :, :]) ** 2
+        ).sum(axis=-1)
+        zone_labels = np.argmin(squared_distances, axis=1)
+        updated_centroids = np.array(
+            [
+                scaled_coordinates[zone_labels == zone].mean(axis=0)
+                if np.any(zone_labels == zone)
+                else centroids[zone]
+                for zone in range(n_zones)
+            ]
+        )
+        if np.allclose(updated_centroids, centroids):
             break
-        C = newC
-    centre = np.array([np.flatnonzero(lab == k)[np.argmin(((X[lab == k] - C[k]) ** 2).sum(1))]
-                       for k in range(n_zones)])
-    return lab, centre
+        centroids = updated_centroids
+
+    centre_nodes = []
+    for zone in range(n_zones):
+        nodes = np.flatnonzero(zone_labels == zone)
+        offsets = scaled_coordinates[nodes] - centroids[zone]
+        closest_node = nodes[np.argmin((offsets**2).sum(axis=1))]
+        centre_nodes.append(closest_node)
+
+    return zone_labels, np.array(centre_nodes)
